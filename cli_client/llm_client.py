@@ -59,11 +59,12 @@ class LLMClient:
         user_text: str,
         tools: list[dict[str, Any]],
         mcp_client: MCPClient,
+        conversation_history: list[dict[str, Any]] | None = None,
     ) -> TurnResult:
         """Обрабатывает один пользовательский запрос и при необходимости вызывает tools."""
 
         response = await self._create_response(
-            input=user_text,
+            input=self._build_turn_input(user_text=user_text, conversation_history=conversation_history),
             tools=tools,
         )
         tool_calls: list[ToolCallLog] = []
@@ -130,7 +131,7 @@ class LLMClient:
     async def _create_response(
         self,
         *,
-        input: str | list[dict[str, Any]],
+        input: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> StreamedResponse:
         params = self._build_stream_request_params(
@@ -203,6 +204,18 @@ class LLMClient:
 
         ordered_calls = [function_calls[index] for index in sorted(function_calls)]
         return StreamedResponse(id=response_id, output=ordered_calls, output_text="".join(answer_parts).strip())
+
+    @staticmethod
+    def _build_turn_input(
+        *,
+        user_text: str,
+        conversation_history: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """Собирает вход для текущего хода с учетом предыдущих сообщений."""
+
+        input_items = list(conversation_history or [])
+        input_items.extend(LLMClient._normalize_input(user_text))
+        return input_items
 
     @staticmethod
     def _build_stream_request_params(

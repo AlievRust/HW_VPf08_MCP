@@ -49,6 +49,27 @@ class LlmClientTest(unittest.TestCase):
             },
         )
 
+    def test_turn_input_includes_conversation_history(self) -> None:
+        payload = LLMClient._build_turn_input(
+            user_text="покажи все заметки",
+            conversation_history=[
+                {"role": "user", "content": "покажи заметку 1"},
+                {"role": "assistant", "content": "Вот заметка 1"},
+            ],
+        )
+
+        self.assertEqual(
+            payload,
+            [
+                {"role": "user", "content": "покажи заметку 1"},
+                {"role": "assistant", "content": "Вот заметка 1"},
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "покажи все заметки"}],
+                },
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

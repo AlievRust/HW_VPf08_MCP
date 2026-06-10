@@ -10,7 +10,7 @@
 ## Поток данных
 
 1. Пользователь вводит текст в CLI.
-2. CLI отправляет запрос в OpenAI Responses API.
+2. CLI отправляет в OpenAI Responses API последние сообщения диалога плюс текущий ввод.
 3. Модель либо отвечает текстом, либо возвращает `function_call`.
 4. CLI вызывает соответствующий MCP tool через `MCPClient`.
 5. Результат tool call возвращается в модель как `function_call_output`.
@@ -31,6 +31,7 @@
 CLI:
 - загружает настройки из `.env`
 - валидирует `OPENAI_API_KEY` и `OPENAI_MODEL`
+- читает `CHAT_HISTORY_LIMIT` и хранит последние сообщения диалога в памяти
 - подключается к MCP-серверу по `MCP_SERVER_URL`
 - получает список MCP tools и преобразует их в OpenAI function tools
 - обрабатывает команды `/help`, `/tools`, `/debug on`, `/debug off`, `/exit`

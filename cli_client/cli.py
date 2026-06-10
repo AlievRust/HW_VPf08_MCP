@@ -21,6 +21,7 @@ class ChatState:
 
     debug_enabled: bool = False
     history: list[dict[str, str]] = field(default_factory=list)
+    history_limit: int = 10
 
 
 HELP_TEXT = """Доступные команды:
@@ -48,11 +49,10 @@ async def main() -> int:
         return 1
 
     llm_client = LLMClient(config)
-    state = ChatState()
+    state = ChatState(history_limit=config.chat_history_limit)
 
     try:
         async with MCPClient(config.mcp_server_url) as mcp_client:
-            state.history.append({"role": "system", "content": "CLI-сессия запущена."})
             print("notes-mcp CLI запущен. Напишите /help для списка команд.")
             await _chat_loop(llm_client, mcp_client, state)
     except MCPClientError as exc:
@@ -93,6 +93,7 @@ async def _chat_loop(llm_client: LLMClient, mcp_client: MCPClient, state: ChatSt
                 user_text=user_text,
                 tools=mcp_client.openai_tools,
                 mcp_client=mcp_client,
+                conversation_history=state.history,
             )
         except MCPClientError as exc:
             print(f"Ошибка MCP: {exc}")
@@ -103,6 +104,7 @@ async def _chat_loop(llm_client: LLMClient, mcp_client: MCPClient, state: ChatSt
 
         state.history.append({"role": "user", "content": user_text})
         state.history.append({"role": "assistant", "content": turn_result.answer})
+        state.history = _trim_history(state.history, state.history_limit)
 
         if state.debug_enabled:
             _print_debug_turn(turn_result.tool_calls, turn_result.answer)
@@ -166,6 +168,14 @@ def _print_debug_turn(tool_calls: list[ToolCallLog], answer: str) -> None:
             )
             print(indent(payload, "  "))
     print(f"[debug] финальный ответ: {answer}")
+
+
+def _trim_history(history: list[dict[str, str]], limit: int) -> list[dict[str, str]]:
+    """Оставляет только последние limit сообщений диалога."""
+
+    if limit <= 0:
+        return []
+    return history[-limit:]
 
 
 if __name__ == "__main__":
