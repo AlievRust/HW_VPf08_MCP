@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from cli_client.config import AppConfig
 from cli_client.mcp_client import MCPClient
@@ -29,11 +28,30 @@ class TurnResult:
     tool_calls: list[ToolCallLog]
 
 
+@dataclass(slots=True)
+class StreamFunctionCall:
+    """Минимальное представление function call для обработки stream-ответа."""
+
+    name: str
+    arguments: str
+    call_id: str
+    type: str = "function_call"
+
+
+@dataclass(slots=True)
+class StreamedResponse:
+    """Минимальная обертка над результатом streaming Responses API."""
+
+    id: str
+    output: list[StreamFunctionCall]
+    output_text: str
+
+
 class LLMClient:
     """Обертка над OpenAI Responses API."""
 
     def __init__(self, config: AppConfig) -> None:
-        self._client = OpenAI(api_key=config.openai_api_key, base_url=config.openai_base_url)
+        self._client = AsyncOpenAI(api_key=config.openai_api_key, base_url=config.openai_base_url)
         self._model = config.openai_model
 
     async def run_turn(
@@ -41,14 +59,12 @@ class LLMClient:
         user_text: str,
         tools: list[dict[str, Any]],
         mcp_client: MCPClient,
-        previous_response_id: str | None = None,
     ) -> TurnResult:
         """Обрабатывает один пользовательский запрос и при необходимости вызывает tools."""
 
         response = await self._create_response(
             input=user_text,
             tools=tools,
-            previous_response_id=previous_response_id,
         )
         tool_calls: list[ToolCallLog] = []
 
@@ -105,10 +121,10 @@ class LLMClient:
                     }
                 )
 
+            input_items = [asdict(item) for item in getattr(response, "output", [])] + outputs
             response = await self._create_response(
-                input=outputs,
+                input=input_items,
                 tools=tools,
-                previous_response_id=response.id,
             )
 
     async def _create_response(
@@ -116,18 +132,108 @@ class LLMClient:
         *,
         input: str | list[dict[str, Any]],
         tools: list[dict[str, Any]],
-        previous_response_id: str | None,
-    ) -> Any:
+    ) -> StreamedResponse:
+        params = self._build_stream_request_params(
+            model=self._model,
+            instructions=self._system_prompt(),
+            input=self._normalize_input(input),
+            tools=tools,
+        )
+
+        response_id = ""
+        answer_parts: list[str] = []
+        function_calls: dict[int, StreamFunctionCall] = {}
+
+        stream = await self._client.responses.create(**params)
+        async with stream:
+            async for event in stream:
+                event_response_id = getattr(event, "response_id", "")
+                if event_response_id:
+                    response_id = event_response_id
+
+                if event.type == "response.output_text.delta":
+                    answer_parts.append(getattr(event, "delta", ""))
+                    continue
+
+                if event.type == "response.output_text.done":
+                    answer = getattr(event, "text", "")
+                    if answer:
+                        answer_parts = [answer]
+                    continue
+
+                if event.type == "response.output_item.added":
+                    item = getattr(event, "item", None)
+                    if getattr(item, "type", None) == "function_call":
+                        item_data = item.to_dict() if hasattr(item, "to_dict") else {}
+                        function_calls[getattr(event, "output_index", 0)] = StreamFunctionCall(
+                            name=str(item_data.get("name", "")),
+                            arguments=str(item_data.get("arguments", "")),
+                            call_id=str(item_data.get("call_id", "")),
+                        )
+                    continue
+
+                if event.type == "response.function_call_arguments.delta":
+                    output_index = getattr(event, "output_index", 0)
+                    function_call = function_calls.get(output_index)
+                    if function_call is None:
+                        function_call = StreamFunctionCall(
+                            name="",
+                            arguments="",
+                            call_id=getattr(event, "item_id", ""),
+                        )
+                        function_calls[output_index] = function_call
+                    function_call.arguments += getattr(event, "delta", "")
+                    continue
+
+                if event.type == "response.function_call_arguments.done":
+                    item = getattr(event, "item", None)
+                    item_data = item.to_dict() if hasattr(item, "to_dict") else {}
+                    output_index = getattr(event, "output_index", 0)
+                    existing_call = function_calls.get(output_index)
+                    function_calls[getattr(event, "output_index", 0)] = StreamFunctionCall(
+                        name=str(item_data.get("name") or getattr(existing_call, "name", "")),
+                        arguments=str(item_data.get("arguments") or getattr(existing_call, "arguments", "")),
+                        call_id=str(item_data.get("call_id") or getattr(existing_call, "call_id", "")),
+                    )
+                    continue
+
+                if event.type == "response.completed" and not response_id:
+                    response = getattr(event, "response", None)
+                    response_id = getattr(response, "id", "")
+
+        ordered_calls = [function_calls[index] for index in sorted(function_calls)]
+        return StreamedResponse(id=response_id, output=ordered_calls, output_text="".join(answer_parts).strip())
+
+    @staticmethod
+    def _build_stream_request_params(
+        *,
+        model: str,
+        instructions: str,
+        input: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {
-            "model": self._model,
-            "instructions": self._system_prompt(),
+            "model": model,
+            "instructions": instructions,
             "input": input,
             "tools": tools,
+            "stream": True,
             "store": True,
         }
-        if previous_response_id:
-            params["previous_response_id"] = previous_response_id
-        return await asyncio.to_thread(self._client.responses.create, **params)
+        return params
+
+    @staticmethod
+    def _normalize_input(input_data: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Приводит input к формату списка сообщений для Responses API."""
+
+        if isinstance(input_data, str):
+            return [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": input_data}],
+                }
+            ]
+        return input_data
 
     @staticmethod
     def _parse_arguments(raw_arguments: Any) -> tuple[dict[str, Any], str | None]:
@@ -146,9 +252,9 @@ class LLMClient:
     @staticmethod
     def _system_prompt() -> str:
         return (
-            "Ты - помощник для учебного проекта notes-mcp. "
+            "Ты - помощник проекта notes-mcp (менеджер заметок). "
             "Отвечай по-русски, дружелюбно и структурированно. "
-            "Если запрос касается заметок, используй доступные MCP tools. "
+            "Если запрос касается заметок, используй доступные инструменты MCP tools. "
+            "Если инструмент не нужен, просто ответь пользователю обычным текстом. "
             "Не показывай пользователю сырой JSON, если только тебя явно не попросили об этом."
         )
-

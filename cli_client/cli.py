@@ -19,7 +19,6 @@ from cli_client.mcp_client import MCPClient, MCPClientError
 class ChatState:
     """Состояние текущего диалога в памяти процесса."""
 
-    previous_response_id: str | None = None
     debug_enabled: bool = False
     history: list[dict[str, str]] = field(default_factory=list)
 
@@ -94,7 +93,6 @@ async def _chat_loop(llm_client: LLMClient, mcp_client: MCPClient, state: ChatSt
                 user_text=user_text,
                 tools=mcp_client.openai_tools,
                 mcp_client=mcp_client,
-                previous_response_id=state.previous_response_id,
             )
         except MCPClientError as exc:
             print(f"Ошибка MCP: {exc}")
@@ -103,7 +101,6 @@ async def _chat_loop(llm_client: LLMClient, mcp_client: MCPClient, state: ChatSt
             print(f"Неожиданная ошибка: {exc}")
             continue
 
-        state.previous_response_id = turn_result.response_id
         state.history.append({"role": "user", "content": user_text})
         state.history.append({"role": "assistant", "content": turn_result.answer})
 
